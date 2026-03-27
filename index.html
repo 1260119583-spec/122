@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>切水果 - 立体粒子文字版</title>
+    <style>
+        body { margin: 0; background: #0a0a0a; overflow: hidden; font-family: 'Microsoft YaHei', sans-serif; }
+        canvas { display: block; cursor: crosshair; }
+        #ui { 
+            position: absolute; top: 20px; left: 20px; color: #00ffcc; 
+            font-size: 32px; pointer-events: none; text-shadow: 0 0 10px rgba(0,255,204,0.5);
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">分数: <span id="score">0</span></div>
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * 配置参数
+ */
+const CONFIG = {
+    GRAVITY: 0.05,
+    SPAWN_RATE: 0.02,
+    RADIUS_BASE: 50,
+};
+
+// 3D 文字粒子配置
+const TEXT_CONFIG = {
+    text: "杨远帆",
+    fontSize: 100,
+    colorHSL: 180, // 青色基调
+    rotateSpeedY: 0.015, // 绕Y轴旋转（翻转）
+    rotateSpeedX: 0.005,  // 绕X轴微调
+    fov: 300 // 视场深度（越小透视越夸张）
+};
+
+class Vec2 {
+    constructor(x, y) { this.x = x; this.y = y; }
+    add(v) { return new Vec2(this.x + v.x, this.y + v.y); }
+    static distance(v1, v2) { return Math.sqrt((v1.x - v2.x)**2 + (v1.y - v2.y)**2); }
+}
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+
+let width, height, score, fruits, particles, blade;
+let textParticles = []; 
+let textCenter = { x: 0, y: 0 }; 
+let textAngleX = 0, textAngleY = 0; // 3D旋转角度
+
+/**
+ * 1. 初始化 3D 文字粒子
+ */
+function initTextParticles() {
+    textParticles = [];
+    
+    // 创建离屏 Canvas
+    const tempCanvas = document.createElement('canvas');
+    const tempCtx = tempCanvas.getContext('2d');
+    const fSize = TEXT_CONFIG.fontSize;
+    tempCanvas.width = fSize * TEXT_CONFIG.text.length;
+    tempCanvas.height = fSize * 1.5;
+    
+    tempCtx.fillStyle = 'black';
+    tempCtx.font = `bold ${fSize}px "Microsoft YaHei"`;
+    tempCtx.textBaseline = 'middle';
+    tempCtx.fillText(TEXT_CONFIG.text, 0, tempCanvas.height / 2);
+    
+    const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+    const data = imageData.data;
+    
+    const gap = 3; // 采样间距
+    for (let y = 0; y < tempCanvas.height; y += gap) {
+        for (let x = 0; x < tempCanvas.width; x += gap) {
+            const alpha = data[(y * tempCanvas.width + x) * 4 + 3];
+            if (alpha > 128) {
+                // 记录相对中心点的 3D 坐标
+                textParticles.push({
+                    relX: x - tempCanvas.width / 2,
+                    relY: y - tempCanvas.height / 2,
+                    relZ: 0 // 初始排成平面
+                });
+            }
+        }
+    }
+}
+
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    // 设置文字中心（屏幕中央偏上）
+    textCenter = { x: width / 2, y: height * 0.35 };
+}
+
+function init() {
+    resize();
+    initTextParticles(); 
+    score = 0;
+    fruits = [];
+    particles = [];
+    blade = { path: [] };
+    scoreEl.innerText = score;
+}
+
+window.addEventListener('resize', init);
+
+/**
+ * 水果粒子（果汁）
+ */
+class Particle {
+    constructor(x, y, color) {
+        this.pos = new Vec2(x, y);
+        this.vel = new Vec2((Math.random()-0.5)*12, (Math.random()-0.5)*12);
+        this.life = 1.0;
+        this.color = color;
+    }
+    update() {
+        this.pos = this.pos.add(this.vel);
+        this.life -= 0.02;
+    }
+    draw() {
+        ctx.fillStyle = this.color;
+        ctx.globalAlpha = this.life;
+        ctx.beginPath();
+        ctx.arc(this.pos.x, this.pos.y, 5, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+}
+
+/**
+ * 水果类
+ */
+class Fruit {
+    constructor() {
+        this.radius = CONFIG.RADIUS_BASE + Math.random() * 20;
+        this.pos = new Vec2(Math.random() * (width - 200) + 100, height + 60);
+        const targetX = width / 2 + (Math.random() - 0.5) * 400;
+        // 极低冲量，配合低重力
+        const vy = -(Math.random() * 3 + 6);
+        this.vel = new Vec2((targetX - this.pos.x) / 100, vy);
+        this.color = `hsl(${Math.random() * 360}, 80%, 60%)`;
+        this.sliced = false;
+        this.angle = 0;
+        this.rotSpeed = (Math.random() - 0.5) * 0.03;
+    }
+
+    update() {
+        this.vel.y += CONFIG.GRAVITY;
+        this.pos = this.pos.add(this.vel);
+        this.angle += this.rotSpeed;
+        return this.pos.y < height + 200;
+    }
+
+    draw() {
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        ctx.rotate(this.angle);
+        
+        if (!this.sliced) {
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.beginPath();
+            ctx.arc(-this.radius*0.3, -this.radius*0.3, this.radius*0.3, 0, Math.PI*2);
+            ctx.fill();
+        } else {
+            ctx.fillStyle = this.color;
+            ctx.beginPath(); ctx.arc(-10, 0, this.radius, Math.PI*0.5, Math.PI*1.5); ctx.fill();
+            ctx.beginPath(); ctx.arc(10, 0, this.radius, Math.PI*1.5, Math.PI*0.5); ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    slice() {
+        if (this.sliced) return;
+        this.sliced = true;
+        score += 10;
+        scoreEl.innerText = score;
+        for(let i=0; i<20; i++) particles.push(new Particle(this.pos.x, this.pos.y, this.color));
+    }
+}
+
+// 刀光移动监听
+canvas.addEventListener('mousemove', (e) => {
+    blade.path.push({ x: e.clientX, y: e.clientY, time: Date.now() });
+    if (blade.path.length > 12) blade.path.shift();
+    
+    fruits.forEach(f => {
+        if (!f.sliced && Vec2.distance(new Vec2(e.clientX, e.clientY), f.pos) < f.radius + 10) {
+            f.slice();
+        }
+    });
+});
+
+/**
+ * 2. 绘制立体文字粒子 (核心 3D 投影逻辑)
+ */
+function draw3DTextParticles() {
+    textAngleY += TEXT_CONFIG.rotateSpeedY; // 绕Y轴持续旋转
+    textAngleX += TEXT_CONFIG.rotateSpeedX; // 绕X轴微调
+    
+    const cosY = Math.cos(textAngleY);
+    const sinY = Math.sin(textAngleY);
+    const cosX = Math.cos(textAngleX);
+    const sinX = Math.sin(textAngleX);
+    const fov = TEXT_CONFIG.fov;
+
+    // 先根据深度（Z轴）排序，防止后面的粒子挡住前面的粒子
+    // 渲染时遵循“由远及近”原则
+    textParticles.sort((a, b) => b.relZ - a.relZ);
+
+    for (let p of textParticles) {
+        // --- 1. 3D 旋转计算 ---
+        // 初始坐标
+        let x = p.relX;
+        let y = p.relY;
+        let z = p.relZ;
+
+        // 绕 Y 轴旋转
+        let rx = x * cosY - z * sinY;
+        let rz = x * sinY + z * cosY;
+        
+        // 绕 X 轴旋转 (微调)
+        let ry = y * cosX - rz * sinX;
+        let pZ = y * sinX + rz * cosX; // 最终深度 pZ
+
+        // --- 2. 透视投影计算 ---
+        // scale 公式：fov / (fov + z)
+        const perspectiveScale = fov / (fov + pZ);
+        
+        // 屏幕坐标 = 中心点 + 投影后的相对坐标
+        const finalX = textCenter.x + rx * perspectiveScale;
+        const finalY = textCenter.y + ry * perspectiveScale;
+        
+        // --- 3. 立体视觉效果 ---
+        // 粒子大小：越远（Z大）越小
+        const size = Math.max(0.5, 2.8 * perspectiveScale);
+        
+        // 粒子亮度和透明度：越远越暗、越透明
+        // 使用 HSL 方便根据距离调整亮度（Lightness）
+        // 亮度范围 30%-80%，透明度范围 0.3-1
+        const lightness = 30 + 50 * Math.max(0, Math.min(1, perspectiveScale)); 
+        const alpha = 0.3 + 0.7 * Math.max(0, Math.min(1, perspectiveScale)); 
+        
+        ctx.fillStyle = `hsla(${TEXT_CONFIG.colorHSL}, 100%, ${lightness}%, ${alpha})`;
+        
+        // 远处（Z轴深处）的粒子加模糊景深
+        if (pZ > 50) {
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = `hsla(${TEXT_CONFIG.colorHSL}, 100%, 50%, 0.3)`;
+        } else {
+            ctx.shadowBlur = 0;
+        }
+
+        // 绘制粒子
+        ctx.fillRect(finalX, finalY, size, size);
+    }
+    
+    ctx.shadowBlur = 0; 
+}
+
+function update() {
+    // 渐变背景
+    const g = ctx.createLinearGradient(0, 0, 0, height);
+    g.addColorStop(0, '#000');
+    g.addColorStop(1, '#1a1a1a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, width, height);
+
+    // 1. 绘制立体粒子文字 (背景)
+    draw3DTextParticles();
+
+    // 2. 绘制刀光
+    if (blade.path.length > 2) {
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#00ffcc';
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 6;
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(blade.path[0].x, blade.path[0].y);
+        for(let p of blade.path) ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+    }
+    if (blade.path.length > 0 && Date.now() - blade.path[0].time > 200) blade.path.shift();
+
+    // 3. 更新水果和果汁
+    fruits = fruits.filter(f => {
+        const active = f.update();
+        f.draw();
+        return active;
+    });
+
+    particles = particles.filter(p => {
+        p.update();
+        p.draw();
+        return p.life > 0;
+    });
+
+    if (Math.random() < CONFIG.SPAWN_RATE) {
+        fruits.push(new Fruit());
+    }
+
+    requestAnimationFrame(update);
+}
+
+// 启动
+init();
+update();
+</script>
+</body>
+</html>
